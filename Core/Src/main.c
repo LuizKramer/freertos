@@ -57,13 +57,39 @@ SemaphoreHandle_t sem = NULL;
 SemaphoreHandle_t mutex = NULL;
 TimerHandle_t debounce;
 QueueHandle_t queue_keyb;
-QueueHandle_t serial_queue;
+QueueHandle_t queue_tx;
+QueueHandle_t queue_rx;
+
 volatile uint32_t counter = 0;
 
 void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart) {
   BaseType_t pxHigherPriorityTaskWoken = pdFALSE;
   xSemaphoreGiveFromISR(sem, &pxHigherPriorityTaskWoken);
   portYIELD_FROM_ISR(pxHigherPriorityTaskWoken);
+}
+
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart){
+	BaseType_t pxHigherPriorityTaskWoken = pdFALSE;
+	xQueueSendToBackFromISR(queue_rx, huart->pRxBuffPtr, &pxHigherPriorityTaskWoken);
+	portYIELD_FROM_ISR(pxHigherPriorityTaskWoken);
+}
+
+void transmite_uart(uint8_t *string, uint32_t len){
+	if (xSemaphoreTake(mutex, 100) == pdTRUE){
+		if (HAL_UART_Transmit_IT(&hlpuart1, string, len) == HAL_OK){
+			xSemaphoreTake(sem, portMAX_DELAY);
+		}
+		xSemaphoreGive(mutex);
+	}
+}
+
+void uart_transmit(char *str, uint32_t len) {
+  if (xSemaphoreTake(mutex, 100) == pdTRUE) {
+    if (HAL_UART_Transmit_IT(&hlpuart1, (uint8_t *)str, len) == HAL_OK) {
+      xSemaphoreTake(sem, portMAX_DELAY);
+    }
+    xSemaphoreGive(mutex);
+  }
 }
 
 void blink_led(void *param) {
@@ -74,6 +100,26 @@ void blink_led(void *param) {
     HAL_GPIO_TogglePin(led->led_port, led->led_pin);
     vTaskDelayUntil(&timer, led->led_toggle_time);
   }
+}
+
+void receive_uart(uint8_t *data){
+	xQueueReceive(queue_rx, data, portMAX_DELAY);
+}
+
+void echo(void *param){
+	uint8_t data;
+	uint8_t data_rx;
+	HAL_UART_Receive_IT(&hlpuart1, &data, 1);
+	while(1){
+		receive_uart(&data_rx);
+	if (data_rx == '\r'){
+			transmite_uart(&data_rx, 1);
+			data_rx = '\n';
+			transmite_uart(&data_rx, 1);
+		}else{
+			transmite_uart(&data_rx, 1);
+		}
+	}
 }
 
 volatile uint32_t cnt1 = 0;
@@ -107,26 +153,20 @@ void send_serial(void *param) {
     taskYIELD();
   }
 }
-void uart_transmit(char *str, uint32_t len) {
-  if (xSemaphoreTake(mutex, 100) == pdTRUE) {
-    if (HAL_UART_Transmit_IT(&hlpuart1, (uint8_t *)str, len) == HAL_OK) {
-      xSemaphoreTake(sem, portMAX_DELAY);
-      ctn++;
-    }
-    xSemaphoreGive(mutex);
-  }
-}
+
 
 void print_serial(void *param) {
     char msg[64];
 
     while (1) {
         // Wait for message from queue
-        if (xQueueReceive(serial_queue, &msg, portMAX_DELAY) == pdTRUE) {
+        if (xQueueReceive(queue_tx, &msg, portMAX_DELAY) == pdTRUE) {
             uart_transmit(msg, strlen(msg));
         }
     }
 }
+
+
 
 
 
@@ -139,7 +179,7 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin) {
 
     const char *string = "Hello from IRQ\r\n";
 
-    xQueueSendFromISR(serial_queue, string, &pxHigherPriorityTaskWoken);
+    xQueueSendFromISR(queue_tx, string, &pxHigherPriorityTaskWoken);
 
     portYIELD_FROM_ISR(pxHigherPriorityTaskWoken);
 }
@@ -204,7 +244,7 @@ int main(void) {
   mutex = xSemaphoreCreateMutex();
   sem = xSemaphoreCreateBinary();
   debounce =
-      xTimerCreate("debounce do teclado", 50, pdFALSE, NULL, debounce_callback);
+  xTimerCreate("debounce do teclado", 50, pdFALSE, NULL, debounce_callback);
   /* USER CODE END RTOS_MUTEX */
 
   /* USER CODE BEGIN RTOS_SEMAPHORES */
@@ -217,7 +257,9 @@ int main(void) {
 
   /* USER CODE BEGIN RTOS_QUEUES */
   queue_keyb = xQueueCreate(16, sizeof(char));
-  serial_queue = xQueueCreate(8, sizeof(char[64]));
+  queue_tx = xQueueCreate(8, sizeof(char[64]));
+  queue_rx = xQueueCreate(16, sizeof(uint8_t));
+
   /* USER CODE END RTOS_QUEUES */
 
   /* Create the thread(s) */
@@ -238,7 +280,8 @@ int main(void) {
   // xTaskCreate(send_serial, "Serial1",256, string, 3, NULL);
   // xTaskCreate(send_serial, "Serial1",256, string2, 3, NULL);
   // xTaskCreate(envia_serial_1, "serial 1", 256, NULL, 6, NULL);
-  xTaskCreate(print_serial, "Print Serial", 256, NULL, 1, NULL);
+  xTaskCreate(print_serial, "Print Serial", 256, NULL, 3, NULL);
+  xTaskCreate(echo, "echo serial", 256, NULL, 3, NULL);
   /* USER CODE END RTOS_THREADS */
 
   /* Start scheduler */
