@@ -22,9 +22,10 @@
 #include "portmacro.h"
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include "FreeRTOS_CLI.h"
 #include <stdint.h>
 #include <string.h>
-#include "FreeRTOS_CLI.h"
+
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -59,19 +60,14 @@ QueueHandle_t queue_keyb;
 QueueHandle_t queue_tx;
 QueueHandle_t queue_rx;
 
-
-
-
 volatile uint32_t counter = 0;
 
-#define MAX_INPUT_LENGTH    50
-#define MAX_OUTPUT_LENGTH   100
+#define MAX_INPUT_LENGTH 50
+#define MAX_OUTPUT_LENGTH 100
 
-static const int8_t * const pcWelcomeMessage =
-  "FreeRTOS command server.rnType Help to view a list of registered commands.rn";
-
-
-
+static const int8_t *const pcWelcomeMessage =
+    "FreeRTOS command server.rnType Help to view a list of registered "
+    "commands.rn\n";
 
 void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart) {
   BaseType_t pxHigherPriorityTaskWoken = pdFALSE;
@@ -79,19 +75,20 @@ void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart) {
   portYIELD_FROM_ISR(pxHigherPriorityTaskWoken);
 }
 
-void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart){
-	BaseType_t pxHigherPriorityTaskWoken = pdFALSE;
-	xQueueSendToBackFromISR(queue_rx, huart->pRxBuffPtr, &pxHigherPriorityTaskWoken);
-	portYIELD_FROM_ISR(pxHigherPriorityTaskWoken);
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart) {
+  BaseType_t pxHigherPriorityTaskWoken = pdFALSE;
+  xQueueSendToBackFromISR(queue_rx, huart->pRxBuffPtr,
+                          &pxHigherPriorityTaskWoken);
+  portYIELD_FROM_ISR(pxHigherPriorityTaskWoken);
 }
 
-void transmite_uart(uint8_t *string, uint32_t len){
-	if (xSemaphoreTake(mutex, 100) == pdTRUE){
-		if (HAL_UART_Transmit_IT(&hlpuart1, string, len) == HAL_OK){
-			xSemaphoreTake(sem, portMAX_DELAY);
-		}
-		xSemaphoreGive(mutex);
-	}
+void transmite_uart(uint8_t *string, uint32_t len) {
+  if (xSemaphoreTake(mutex, 100) == pdTRUE) {
+    if (HAL_UART_Transmit_IT(&hlpuart1, string, len) == HAL_OK) {
+      xSemaphoreTake(sem, portMAX_DELAY);
+    }
+    xSemaphoreGive(mutex);
+  }
 }
 
 void uart_transmit(char *str, uint32_t len) {
@@ -103,34 +100,24 @@ void uart_transmit(char *str, uint32_t len) {
   }
 }
 
-void blink_led(void *param) {
-  led_params_t *led = (led_params_t *)param;
-  TickType_t timer;
+void receive_uart(uint8_t *data) {
+  xQueueReceive(queue_rx, data, portMAX_DELAY);
+}
+
+void echo(void *param) {
+  uint8_t data;
+  uint8_t data_rx;
+  HAL_UART_Receive_IT(&hlpuart1, &data, 1);
   while (1) {
-    timer = xTaskGetTickCount();
-    HAL_GPIO_TogglePin(led->led_port, led->led_pin);
-    vTaskDelayUntil(&timer, led->led_toggle_time);
+    receive_uart(&data_rx);
+    if (data_rx == '\r') {
+      transmite_uart(&data_rx, 1);
+      data_rx = '\n';
+      transmite_uart(&data_rx, 1);
+    } else {
+      transmite_uart(&data_rx, 1);
+    }
   }
-}
-
-void receive_uart(uint8_t *data){
-	xQueueReceive(queue_rx, data, portMAX_DELAY);
-}
-
-void echo(void *param){
-	uint8_t data;
-	uint8_t data_rx;
-	HAL_UART_Receive_IT(&hlpuart1, &data, 1);
-	while(1){
-		receive_uart(&data_rx);
-	if (data_rx == '\r'){
-			transmite_uart(&data_rx, 1);
-			data_rx = '\n';
-			transmite_uart(&data_rx, 1);
-		}else{
-			transmite_uart(&data_rx, 1);
-		}
-	}
 }
 
 volatile uint32_t cnt1 = 0;
@@ -165,127 +152,115 @@ void send_serial(void *param) {
   }
 }
 
-
 void print_serial(void *param) {
-    char msg[64];
+  char msg[64];
 
-    while (1) {
-        // Wait for message from queue
-        if (xQueueReceive(queue_tx, &msg, portMAX_DELAY) == pdTRUE) {
-            uart_transmit(msg, strlen(msg));
-        }
+  while (1) {
+    // Wait for message from queue
+    if (xQueueReceive(queue_tx, &msg, portMAX_DELAY) == pdTRUE) {
+      uart_transmit(msg, strlen(msg));
     }
+  }
 }
 
+void vCommandConsoleTask(void *pvParameters) {
+  int8_t cRxedChar, cInputIndex = 0;
+  BaseType_t xMoreDataToFollow;
+  /* The input and output buffers are declared static to keep them off the
+   * stack. */
+  static int8_t pcOutputString[MAX_OUTPUT_LENGTH],
+      pcInputString[MAX_INPUT_LENGTH];
 
+  /* This code assumes the peripheral being used as the console has already
+     been opened and configured, and is passed into the task as the task
+     parameter. Cast the task parameter to the correct type. */
 
+  /* Send a welcome message to the user knows they are connected. */
+  transmite_uart(pcWelcomeMessage, strlen(pcWelcomeMessage));
 
-void vCommandConsoleTask( void *pvParameters )
-{
-int8_t cRxedChar, cInputIndex = 0;
-BaseType_t xMoreDataToFollow;
-/* The input and output buffers are declared static to keep them off the stack. */
-static int8_t pcOutputString[ MAX_OUTPUT_LENGTH ], pcInputString[ MAX_INPUT_LENGTH ];
+  for (;;) {
+    /* This implementation reads a single character at a time. Wait in the
+       Blocked state until a character is received. */
+    HAL_UART_Receive_IT(&hlpuart1, &cRxedChar, 1);
 
-    /* This code assumes the peripheral being used as the console has already
-       been opened and configured, and is passed into the task as the task
-       parameter. Cast the task parameter to the correct type. */
+    receive_uart(&cRxedChar);
 
-    /* Send a welcome message to the user knows they are connected. */
-    transmite_uart( pcWelcomeMessage, strlen( pcWelcomeMessage ) );
-
-    for( ;; )
-    {
-        /* This implementation reads a single character at a time. Wait in the
-           Blocked state until a character is received. */
-	HAL_UART_Receive_IT(&hlpuart1, &cRxedChar, 1);
-
-        receive_uart( &cRxedChar );
-
-        if( cRxedChar == '\r' )
-        {
-            /* A newline character was received, so the input command string is
-               complete and can be processed. Transmit a line separator, just to
-               make the output easier to read. */
-            transmite_uart("\r\n", strlen( "\r\n" ));
-
-            /* The command interpreter is called repeatedly until it returns
-               pdFALSE. See the "Implementing a command" documentation for an
-               exaplanation of why this is. */
-            do
-            {
-                /* Send the command string to the command interpreter. Any
-                   output generated by the command interpreter will be placed in the
-                   pcOutputString buffer. */
-                xMoreDataToFollow = FreeRTOS_CLIProcessCommand
-                              (
-                                  pcInputString,   /* The command string.*/
-                                  pcOutputString,  /* The output buffer. */
-                                  MAX_OUTPUT_LENGTH/* The size of the output buffer. */
-                              );
-
-                /* Write the output generated by the command interpreter to the
-                   console. */
-                transmite_uart( pcOutputString, strlen( pcOutputString ) );
-
-            } while( xMoreDataToFollow != pdFALSE );
-
-            /* All the strings generated by the input command have been sent.
-               Processing of the command is complete. Clear the input string ready
-               to receive the next command. */
-            cInputIndex = 0;
-            memset( pcInputString, 0x00, MAX_INPUT_LENGTH );
-        }
-        else
-        {
-            /* The if() clause performs the processing after a newline character
-               is received. This else clause performs the processing if any other
-               character is received. */
-
-            if( cRxedChar == '\r' )
-            {
-                /* Ignore carriage returns. */
-            }
-            else if( cRxedChar == '\b' )
-            {
-                /* Backspace was pressed. Erase the last character in the input
-                   buffer - if there are any. */
-                if( cInputIndex > 0 )
-                {
-                    cInputIndex--;
-                    pcInputString[ cInputIndex ] = ' ';
-                }
-            }
-            else
-            {
-                /* A character was entered. It was not a new line, backspace
-                   or carriage return, so it is accepted as part of the input and
-                   placed into the input buffer. When a n is entered the complete
-                   string will be passed to the command interpreter. */
-                if( cInputIndex < MAX_INPUT_LENGTH )
-                {
-                    pcInputString[ cInputIndex ] = cRxedChar;
-                    cInputIndex++;
-                }
-            }
-        }
+    if (cRxedChar == '\r') {
+      transmite_uart(&cRxedChar, 1);
+    } else {
+      transmite_uart(&cRxedChar, 1);
     }
+    
+    if (cRxedChar == '\r') {
+      /* A newline character was received, so the input command string is
+         complete and can be processed. Transmit a line separator, just to
+         make the output easier to read. */
+      transmite_uart("\r\n", strlen("\r\n"));
+
+      /* The command interpreter is called repeatedly until it returns
+         pdFALSE. See the "Implementing a command" documentation for an
+         exaplanation of why this is. */
+      do {
+        /* Send the command string to the command interpreter. Any
+           output generated by the command interpreter will be placed in the
+           pcOutputString buffer. */
+        xMoreDataToFollow = FreeRTOS_CLIProcessCommand(
+            pcInputString,    /* The command string.*/
+            pcOutputString,   /* The output buffer. */
+            MAX_OUTPUT_LENGTH /* The size of the output buffer. */
+        );
+
+        /* Write the output generated by the command interpreter to the
+           console. */
+        transmite_uart(pcOutputString, strlen(pcOutputString));
+
+      } while (xMoreDataToFollow != pdFALSE);
+
+      /* All the strings generated by the input command have been sent.
+         Processing of the command is complete. Clear the input string ready
+         to receive the next command. */
+      cInputIndex = 0;
+      memset(pcInputString, 0x00, MAX_INPUT_LENGTH);
+    } else {
+      /* The if() clause performs the processing after a newline character
+         is received. This else clause performs the processing if any other
+         character is received. */
+
+      if (cRxedChar == '\r') {
+        /* Ignore carriage returns. */
+      } else if (cRxedChar == '\b') {
+        /* Backspace was pressed. Erase the last character in the input
+           buffer - if there are any. */
+        if (cInputIndex > 0) {
+          cInputIndex--;
+          pcInputString[cInputIndex] = ' ';
+        }
+      } else {
+        /* A character was entered. It was not a new line, backspace
+           or carriage return, so it is accepted as part of the input and
+           placed into the input buffer. When a n is entered the complete
+           string will be passed to the command interpreter. */
+        if (cInputIndex < MAX_INPUT_LENGTH) {
+          pcInputString[cInputIndex] = cRxedChar;
+          cInputIndex++;
+        }
+      }
+    }
+  }
 }
-
-
 
 void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin) {
-    BaseType_t pxHigherPriorityTaskWoken = pdFALSE;
-    HAL_NVIC_DisableIRQ(EXTI15_10_IRQn);
-    xTimerStartFromISR(debounce, &pxHigherPriorityTaskWoken);
+  BaseType_t pxHigherPriorityTaskWoken = pdFALSE;
+  HAL_NVIC_DisableIRQ(EXTI15_10_IRQn);
+  xTimerStartFromISR(debounce, &pxHigherPriorityTaskWoken);
 
-    HAL_GPIO_TogglePin(LED_GPIO_Port, LED_Pin);
+  HAL_GPIO_TogglePin(LED_GPIO_Port, LED_Pin);
 
-    const char *string = "Hello from IRQ\r\n";
+  const char *string = "Hello from IRQ\r\n";
 
-    xQueueSendFromISR(queue_tx, string, &pxHigherPriorityTaskWoken);
+  xQueueSendFromISR(queue_tx, string, &pxHigherPriorityTaskWoken);
 
-    portYIELD_FROM_ISR(pxHigherPriorityTaskWoken);
+  portYIELD_FROM_ISR(pxHigherPriorityTaskWoken);
 }
 
 void debounce_callback(TimerHandle_t xTimer) {
@@ -348,7 +323,7 @@ int main(void) {
   mutex = xSemaphoreCreateMutex();
   sem = xSemaphoreCreateBinary();
   debounce =
-  xTimerCreate("debounce do teclado", 50, pdFALSE, NULL, debounce_callback);
+      xTimerCreate("debounce do teclado", 50, pdFALSE, NULL, debounce_callback);
   /* USER CODE END RTOS_MUTEX */
 
   /* USER CODE BEGIN RTOS_SEMAPHORES */
@@ -386,7 +361,7 @@ int main(void) {
   // xTaskCreate(envia_serial_1, "serial 1", 256, NULL, 6, NULL);
   xTaskCreate(print_serial, "Print Serial", 256, NULL, 3, NULL);
   // xTaskCreate(echo, "echo serial", 256, NULL, 5, NULL);
-  xTaskCreate(vCommandConsoleTask, "Shell", 256, NULL, 4, NULL);
+  xTaskCreate(vCommandConsoleTask, "Shell", 1024, NULL, 4, NULL);
 
   /* USER CODE END RTOS_THREADS */
 
